@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
-@dataclass
+@dataclass(frozen=True)
 class ShareGPTMessage:
+    """A message in ShareGPT format."""
     from_: str
     value: str
 
@@ -13,8 +14,9 @@ class ShareGPTMessage:
         return {"from": self.from_, "value": self.value}
 
 
-@dataclass
+@dataclass(frozen=True)
 class ShareGPTConversation:
+    """A complete conversation in ShareGPT format."""
     conversations: list[ShareGPTMessage]
     system: str | None = None
 
@@ -46,7 +48,7 @@ def build_system_prompt(
         return "You are a helpful AI assistant with access to tools."
 
     tools_json = "\n".join(
-        f"- {t['function']['name']}: {t['function']['description']}"
+        f"- {t.get('function', {}).get('name', 'unknown')}: {t.get('function', {}).get('description', '')}"
         for t in tool_definitions
     )
     return (

@@ -19,25 +19,28 @@ from geiger.dataset.formatter import (
 from geiger.types import DatasetTrace
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceStep:
+    """A single step in a trace conversation."""
     role: str
     content: str
     tool_calls: list[dict[str, Any]] | None = None
     tool_result: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class DatasetConfig:
+    """Configuration for dataset generation."""
     output_dir: Path = field(default_factory=lambda: Path("output"))
     min_grade_threshold: float = 0.0
     filename_template: str = "data_{index}.json"
 
     def ensure_output_dir(self) -> None:
+        """Create the output directory if it doesn't exist."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
 
-@dataclass
+@dataclass(frozen=True)
 class DatasetStats:
     total_traces: int = 0
     filtered_traces: int = 0
@@ -58,6 +61,8 @@ class DatasetStats:
 
 
 class DatasetGenerator:
+    """Generates datasets from traces with grading."""
+
     def __init__(self, config: DatasetConfig | None = None) -> None:
         self.config = config or DatasetConfig()
 
@@ -99,23 +104,29 @@ class DatasetGenerator:
 
         filtered_traces = self.filter_traces(traces)
 
-        stats = DatasetStats(
-            total_traces=len(traces), filtered_traces=len(filtered_traces)
-        )
+        grades = [t.grade for t in filtered_traces] if filtered_traces else []
+        tool_names: set[str] = set()
+        for t in filtered_traces:
+            if t.tool_definitions:
+                for td in t.tool_definitions:
+                    if 'function' in td and 'name' in td['function']:
+                        tool_names.add(td['function']['name'])
 
-        if filtered_traces:
-            grades = [t.grade for t in filtered_traces]
-            stats.min_grade = min(grades)
-            stats.max_grade = max(grades)
-            stats.avg_grade = sum(grades) / len(grades)
-            if filtered_traces and filtered_traces[0].tool_definitions:
-                stats.tool_count = len(filtered_traces[0].tool_definitions)
+        stats = DatasetStats(
+            total_traces=len(traces),
+            filtered_traces=len(filtered_traces),
+            min_grade=min(grades) if grades else 0.0,
+            max_grade=max(grades) if grades else 0.0,
+            avg_grade=sum(grades) / len(grades) if grades else 0.0,
+            tool_count=len(tool_names),
+        )
 
         write_tasks: list[asyncio.Task[None]] = []
         for idx, trace in enumerate(filtered_traces):
             conversation = self._trace_to_conversation(trace)
             filename = self.config.filename_template.format(index=idx)
             filepath = output_dir / filename
+            tmp_path = filepath.with_suffix('.tmp')
 
             async def write_file(path: Path, data: str) -> None:
                 async with aiofiles.open(path, "w") as f:
@@ -123,14 +134,24 @@ class DatasetGenerator:
 
             write_tasks.append(
                 asyncio.create_task(
-                    write_file(filepath, json.dumps(conversation.to_dict(), indent=2))
+                    write_file(tmp_path, json.dumps(conversation.to_dict(), indent=2))
                 )
             )
 
         await asyncio.gather(*write_tasks)
 
+        for idx, trace in enumerate(filtered_traces):
+            filename = self.config.filename_template.format(index=idx)
+            filepath = output_dir / filename
+            tmp_path = filepath.with_suffix('.tmp')
+            if tmp_path.exists():
+                tmp_path.rename(filepath)
+
         manifest_path = output_dir / "manifest.json"
-        async with aiofiles.open(manifest_path, "w") as f:
+        manifest_tmp_path = manifest_path.with_suffix('.json.tmp')
+        async with aiofiles.open(manifest_tmp_path, "w") as f:
             await f.write(json.dumps(stats.to_dict(), indent=2))
+        if manifest_tmp_path.exists():
+            manifest_tmp_path.rename(manifest_path)
 
         return stats

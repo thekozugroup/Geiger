@@ -194,6 +194,41 @@ class TestTraceGeneration:
         assert len(trace2.messages) == 2
 
 
+class TestToolExecution:
+    @pytest.mark.asyncio
+    async def test_execute_tool_success(self, agent_config, sample_tools):
+        session = AgentSession(agent_config, sample_tools)
+
+        async def mock_handler(**kwargs):
+            return '{"files": ["file1.txt", "file2.txt"]}'
+
+        tool_executor = {"file_search": mock_handler}
+        result = await session.execute_tool("file_search", {"pattern": "*.txt"}, tool_executor)
+        assert "file1.txt" in result
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_not_found(self, agent_config, sample_tools):
+        session = AgentSession(agent_config, sample_tools)
+
+        async def mock_handler(**kwargs):
+            raise FileNotFoundError("Tool not found")
+
+        tool_executor = {"file_search": mock_handler}
+        result = await session.execute_tool("nonexistent_tool", {}, tool_executor)
+        assert "Unknown tool" in result
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_exception(self, agent_config, sample_tools):
+        session = AgentSession(agent_config, sample_tools)
+
+        async def mock_handler(**kwargs):
+            raise RuntimeError("Execution failed")
+
+        tool_executor = {"failing_tool": mock_handler}
+        result = await session.execute_tool("failing_tool", {}, tool_executor)
+        assert "Error" in result
+
+
 class TestAgentSessionToolCalls:
     @pytest.mark.asyncio
     async def test_add_tool_result(self, agent_config, sample_tools):

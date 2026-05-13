@@ -40,7 +40,7 @@ class ToolDefinition:
             raise ValueError("Tool name cannot be empty")
 
 
-@dataclass
+@dataclass(frozen=True)
 class Trace:
     """Canonical trace from agent execution."""
 
@@ -60,7 +60,7 @@ class Trace:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class DatasetTrace:
     """Trace for dataset generation with graded outputs."""
 

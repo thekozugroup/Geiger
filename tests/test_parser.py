@@ -161,3 +161,62 @@ Description here.
         assert len(tools) == 1
         assert len(tools[0].arguments) == 1
         assert tools[0].returns == ""
+
+
+class TestToolRunner:
+    @pytest.fixture
+    def tools_bin_path(self, tmp_path):
+        tool_path = tmp_path / "test_tool"
+        tool_path.write_text("#!/bin/bash\necho hello")
+        tool_path.chmod(0o755)
+        return tmp_path
+
+    @pytest.mark.asyncio
+    async def test_execute_success(self, tools_bin_path):
+        from geiger.tools.parser import ToolRunner
+        runner = ToolRunner(tools_bin_path)
+        result = await runner.execute("test_tool")
+        assert result.success is True
+        assert result.returncode == 0
+        assert "hello" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_execute_with_arguments(self, tmp_path):
+        tool_path = tmp_path / "echo_args"
+        tool_path.write_text("#!/bin/bash\necho $1 $2")
+        tool_path.chmod(0o755)
+        from geiger.tools.parser import ToolRunner
+        runner = ToolRunner(tmp_path)
+        result = await runner.execute("echo_args", {"arg1": "val1", "arg2": "val2"})
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_execute_nonexistent_tool(self, tools_bin_path):
+        from geiger.tools.parser import ToolRunner
+        runner = ToolRunner(tools_bin_path)
+        with pytest.raises(FileNotFoundError):
+            await runner.execute("nonexistent_tool")
+
+    @pytest.mark.asyncio
+    async def test_execute_invalid_tool_name(self, tools_bin_path):
+        from geiger.tools.parser import ToolRunner
+        runner = ToolRunner(tools_bin_path)
+        with pytest.raises(ValueError):
+            await runner.execute("invalid/name")
+
+    @pytest.mark.asyncio
+    async def test_execute_timeout(self, tmp_path):
+        tool_path = tmp_path / "slow_tool"
+        tool_path.write_text("#!/bin/bash\nsleep 10")
+        tool_path.chmod(0o755)
+        from geiger.tools.parser import ToolRunner
+        runner = ToolRunner(tmp_path)
+        result = await runner.execute("slow_tool", timeout=0.1)
+        assert result.success is False
+        assert "Timeout" in result.error_message
+
+    def test_execute_sync(self, tools_bin_path):
+        from geiger.tools.parser import ToolRunner
+        runner = ToolRunner(tools_bin_path)
+        result = runner.execute_sync("test_tool")
+        assert result.success is True

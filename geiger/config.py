@@ -4,8 +4,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 
-@dataclass
+@dataclass(frozen=True)
 class Config:
+    """Configuration for Geiger agent and reviewer."""
     api_base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4"
@@ -36,3 +37,5 @@ class Config:
             raise ValueError("temperature must be between 0.0 and 2.0")
         if self.max_tokens < 1:
             raise ValueError("max_tokens must be >= 1")
+        if not self.api_key:
+            raise ValueError("api_key is required for API calls")

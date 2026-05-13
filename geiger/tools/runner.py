@@ -9,22 +9,26 @@ from geiger.types import ExecutionResult
 
 
 class ToolHandler:
+    """Handles tool execution with concurrency control."""
+
     def __init__(self, max_concurrency: int = 5):
         self.max_concurrency = max_concurrency
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._handlers: dict[str, Callable] = {}
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "ToolHandler":
         self._semaphore = asyncio.Semaphore(self.max_concurrency)
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self._semaphore = None
 
     def register_handler(self, tool_name: str, handler: Callable) -> None:
+        """Register a handler for a tool."""
         self._handlers[tool_name] = handler
 
     async def run_single(self, tool_name: str, params: dict[str, Any]) -> ExecutionResult:
+        """Execute a single tool with given parameters."""
         start = time.time()
 
         if tool_name not in self._handlers:
@@ -62,6 +66,7 @@ class ToolHandler:
     async def run_batch(
         self, tasks: list[tuple[str, dict[str, Any]]]
     ) -> list[ExecutionResult]:
+        """Execute multiple tools concurrently with semaphore control."""
         if self._semaphore is None:
             self._semaphore = asyncio.Semaphore(self.max_concurrency)
 

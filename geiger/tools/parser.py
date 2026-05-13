@@ -266,6 +266,8 @@ class ToolRunner:
         Raises:
             FileNotFoundError: If tool binary does not exist
         """
+        if not re.match(r"^[a-zA-Z0-9_-]+$", tool_name):
+            raise ValueError(f"Invalid tool name: {tool_name}")
         tool_path = self.tools_bin_path / tool_name
         if not tool_path.exists():
             raise FileNotFoundError(f"Tool not found: {tool_path}")

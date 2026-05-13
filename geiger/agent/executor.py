@@ -12,16 +12,18 @@ import httpx
 from geiger.types import ExecutionResult, ToolDefinition, Trace
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolResult:
+    """Result of a tool execution."""
     tool: str
     args: dict[str, Any]
     result: str
     success: bool = True
 
 
-@dataclass
+@dataclass(frozen=True)
 class AgentConfig:
+    """Configuration for agent execution."""
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4"
@@ -35,13 +37,18 @@ class AgentSession:
         config: AgentConfig,
         tools: list[ToolDefinition],
         session_id: str | None = None,
-    ):
+    ) -> None:
         self.config = config
         self.tools = tools
         self.session_id = session_id or str(uuid.uuid4())
         self.messages: list[dict[str, Any]] = []
         self.tool_calls: list[dict[str, Any]] = []
         self._http_client: httpx.AsyncClient | None = None
+
+    def clear(self) -> None:
+        """Clear session messages and tool calls."""
+        self.messages.clear()
+        self.tool_calls.clear()
 
     @property
     def http_client(self) -> httpx.AsyncClient:
@@ -62,6 +69,7 @@ class AgentSession:
             self._http_client = None
 
     def add_message(self, role: str, content: str) -> None:
+        """Add a message to the session history."""
         self.messages.append({"role": role, "content": content})
 
     async def send(
@@ -74,7 +82,10 @@ class AgentSession:
 
         payload = self._build_payload()
         response = await self._call_api(payload)
-        assistant_message = response["choices"][0]["message"]
+        choices = response.get("choices", [])
+        if not choices:
+            return
+        assistant_message = choices[0].get("message", {})
         content = assistant_message.get("content", "")
         self.messages.append({"role": "assistant", "content": content})
 
@@ -160,6 +171,15 @@ class AgentSession:
             self._update_tool_call_result(tool_name, tool_args, result, success=False)
             return result
 
+        tool_def = next((t for t in self.tools if t.name == tool_name), None)
+        if tool_def and tool_def.parameters:
+            expected_params = tool_def.parameters.get("properties", {})
+            for param in expected_params:
+                if param not in tool_args:
+                    result = f"Error: Missing required parameter '{param}'"
+                    self._update_tool_call_result(tool_name, tool_args, result, success=False)
+                    return result
+
         try:
             func = tool_executor[tool_name]
             if asyncio.iscoroutinefunction(func):
@@ -168,7 +188,7 @@ class AgentSession:
                 result = func(**tool_args)
             result_str = json.dumps(result) if not isinstance(result, str) else result
         except Exception as e:
-            result_str = f"Error executing {tool_name}: {str(e)}"
+            result_str = "Error: Tool execution failed"
 
         self._update_tool_call_result(tool_name, tool_args, result_str)
         return result_str
@@ -176,6 +196,7 @@ class AgentSession:
     def _update_tool_call_result(
         self, tool_name: str, tool_args: dict[str, Any], result: str, success: bool = True
     ) -> None:
+        """Update the result of a tool call in the session."""
         for call in self.tool_calls:
             if call["tool"] == tool_name and call["args"] == tool_args and call["result"] == "":
                 call["result"] = result
@@ -222,8 +243,11 @@ class AgentExecutor:
             task_result = await coro
             if task_result is not None:
                 session, trace = task_result
-                await session.close()
-                yield trace
+                try:
+                    yield trace
+                finally:
+                    await session.close()
+                    session.clear()
 
     async def _run_session(
         self,
@@ -247,10 +271,13 @@ class AgentExecutor:
                         )
                 traces.append(session.get_trace())
                 return (session, traces[-1])
-            except Exception as e:
+            except (asyncio.CancelledError, Exception) as e:
                 trace = session.get_trace()
                 trace.error = str(e)
                 return (session, trace)
+            finally:
+                await session.close()
+                session.clear()
 
     async def execute_single(
         self,

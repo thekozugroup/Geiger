@@ -156,6 +156,16 @@ def create_parser() -> argparse.ArgumentParser:
         default=3,
         help="Max concurrent reviewer workers",
     )
+    review_parser.add_argument(
+        "--api-key",
+        default=os.environ.get("OPENAI_API_KEY", ""),
+        help="OpenAI API key (or set OPENAI_API_KEY env var)",
+    )
+    review_parser.add_argument(
+        "--api-base",
+        default="https://api.openai.com/v1",
+        help="API base URL",
+    )
 
     stats_parser = subparsers.add_parser(
         "stats",
@@ -166,11 +176,21 @@ def create_parser() -> argparse.ArgumentParser:
         required=True,
         help="Directory containing dataset files",
     )
+    stats_parser.add_argument(
+        "--api-key",
+        default=os.environ.get("OPENAI_API_KEY", ""),
+        help="OpenAI API key (or set OPENAI_API_KEY env var)",
+    )
+    stats_parser.add_argument(
+        "--api-base",
+        default="https://api.openai.com/v1",
+        help="API base URL",
+    )
 
     return parser
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReviewGrade:
     trace_id: str
     grade: float
@@ -203,8 +223,8 @@ class GeigerCLI:
         self.logger.info("Starting generate pipeline")
         try:
             self.config.validate()
-        except ValueError as e:
-            console.print(f"[red]Configuration error: {e}[/red]")
+        except ValueError:
+            console.print("[red]Configuration error. Please check your settings.[/red]")
             return 1
 
         tools_md_path = Path(self.config.tools_md_path)
@@ -295,8 +315,10 @@ class GeigerCLI:
             console.print(f"[green]Generated {len(traces)} traces[/green]")
 
             traces_file = output_dir / "traces.json"
+            save_task = progress.add_task("[cyan]Saving traces...", total=1)
             with open(traces_file, "w") as f:
                 json.dump([t.to_dict() for t in traces], f, indent=2)
+            progress.update(save_task, completed=1)
             console.print(f"[dim]Traces saved to {traces_file}[/dim]")
 
             review_task = progress.add_task(
@@ -345,7 +367,7 @@ class GeigerCLI:
 
             dataset_task = progress.add_task(
                 "[cyan]Generating ShareGPT dataset...",
-                total=None,
+                total=1,
             )
 
             dataset_traces: list[DatasetTrace] = []
@@ -397,7 +419,7 @@ class GeigerCLI:
         trace_files = list(traces_dir.glob("*.json"))
         if not trace_files:
             console.print(f"[yellow]No trace files found in {traces_dir}[/yellow]")
-            return 0
+            return 1
 
         console.print(f"[cyan]Found {len(trace_files)} trace files[/cyan]")
 
@@ -445,7 +467,7 @@ class GeigerCLI:
                             "trace_id": trace_file.stem,
                             "grade": 0.0,
                             "status": ReviewStatus.REJECTED.value,
-                            "reasoning": f"Error: {e}",
+                            "reasoning": "Error: Review processing failed",
                         }
 
             results: list[dict[str, Any]] = await asyncio.gather(*[review_with_semaphore(tf) for tf in trace_files])
@@ -491,20 +513,26 @@ class GeigerCLI:
         data_files = list(output_dir.glob("data_*.json"))
         if not data_files:
             console.print(f"[yellow]No dataset files found in {output_dir}[/yellow]")
-            return 0
+            return 1
 
         total_traces = len(data_files)
         grades: list[float] = []
-        total_tools = 0
+        tool_names: set[str] = set()
 
         for data_file in data_files:
             try:
                 with open(data_file) as f:
                     data = json.load(f)
-                if "conversations" in data:
-                    total_tools = len(data.get("system", "").split("tools")) - 1
+                if "conversations" in data and "system" in data:
+                    import re
+                    func_matches = re.findall(r'"name"\s*:\s*"([^"]+)"', data["system"])
+                    for name in func_matches:
+                        if name not in ("properties", "type", "object"):
+                            tool_names.add(name)
             except Exception:
                 continue
+
+        total_tools = len(tool_names) if tool_names else 0
 
         stats = DatasetStats(
             total_traces=total_traces,
@@ -552,9 +580,11 @@ class GeigerCLI:
         recursive = kwargs.get("recursive", True)
         max_results = kwargs.get("max_results", 100)
 
-        root = Path(directory)
-        if recursive:
-            files = list(root.rglob(pattern))
+        root = Path(directory).resolve()
+        try:
+            root.relative_to(Path.cwd().resolve())
+        except ValueError:
+            return {"files": [], "error": "Access denied: path outside working directory"}
         else:
             files = list(root.glob(pattern))
 

@@ -13,14 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 class ReviewStatus(Enum):
+    """Status of a trace review."""
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
     NEEDS_REVISION = "needs_revision"
 
 
-@dataclass
+@dataclass(frozen=True)
 class GradeBreakdown:
+    """Breakdown of grades by criterion."""
     tool_usage: float = 0.0
     argument_accuracy: float = 0.0
     relevance: float = 0.0
@@ -44,8 +46,9 @@ class GradeBreakdown:
         )
 
 
-@dataclass
+@dataclass(frozen=True)
 class ReviewResult:
+    """Result of a trace review."""
     status: ReviewStatus
     grade: float
     reasoning: str
@@ -53,13 +56,15 @@ class ReviewResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(frozen=True)
 class TraceData:
+    """Data for a trace to be reviewed."""
     prompt: str
     messages: list[dict[str, Any]]
     tools: Optional[list[dict[str, Any]]] = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary representation."""
         return {
             "prompt": self.prompt,
             "messages": self.messages,
@@ -87,6 +92,12 @@ class Reviewer:
         self._client: httpx.AsyncClient | None = None
 
     @property
+    def semaphore(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.max_workers)
+        return self._semaphore
+
+    @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(
@@ -100,11 +111,13 @@ class Reviewer:
         return self._client
 
     async def close(self) -> None:
+        """Close the reviewer and cleanup resources."""
         if self._client:
             await self._client.aclose()
             self._client = None
 
     def _create_review_prompt(self, trace: TraceData) -> str:
+        """Create a review prompt for the given trace."""
         return f"""Review the following agent trace and grade it on a 0-1 scale.
 
 ## Prompt
@@ -132,7 +145,8 @@ Return a JSON object with this exact structure:
 
 Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
 
-    async def _call_api(self, prompt: str) -> dict[str, Any]:
+    async def _call_api(self, prompt: str) -> str:
+        """Call the review API with the given prompt."""
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
@@ -155,7 +169,10 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
             logger.error(f"Request error during API call: {e}")
             raise
 
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        choices = data.get("choices", [])
+        if not choices:
+            return ""
+        content = choices[0].get("message", {}).get("content", "")
         return content
 
     def _parse_response(self, content: str) -> Optional[dict[str, Any]]:
@@ -174,12 +191,13 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
             return None
 
     def _compute_grade(self, breakdown: GradeBreakdown) -> float:
-        return (
+        grade = (
             breakdown.tool_usage * 0.3
             + breakdown.argument_accuracy * 0.3
             + breakdown.relevance * 0.2
             + breakdown.coherence * 0.2
         )
+        return max(0.0, min(1.0, grade))
 
     def _determine_status(self, grade: float) -> ReviewStatus:
         if grade >= self.min_score:
@@ -206,7 +224,7 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
         except httpx.HTTPStatusError as e:
             logger.error(f"HTTP error during review: {e}")
             breakdown = GradeBreakdown()
-            reasoning = f"HTTP error: {e.response.status_code}"
+            reasoning = "HTTP error: review service unavailable"
         except httpx.TimeoutException as e:
             logger.error(f"Timeout during review: {e}")
             breakdown = GradeBreakdown()
@@ -214,11 +232,11 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
         except httpx.RequestError as e:
             logger.error(f"Request error during review: {e}")
             breakdown = GradeBreakdown()
-            reasoning = f"Request error: {e}"
+            reasoning = "Request error: review service unavailable"
         except Exception as e:
             logger.error(f"Unexpected error during review: {e}")
             breakdown = GradeBreakdown()
-            reasoning = f"Unexpected error: {e}"
+            reasoning = "Unexpected error during review"
 
         grade = self._compute_grade(breakdown)
 
@@ -231,9 +249,15 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
         )
 
     async def review_result(self, result: dict[str, Any]) -> ReviewResult:
+        messages = result.get("messages", [])
+        prompt = result.get("prompt", "")
+        if not isinstance(messages, list):
+            messages = []
+        if not isinstance(prompt, str):
+            prompt = ""
         trace_data = TraceData(
-            prompt=result.get("prompt", ""),
-            messages=result.get("messages", []),
+            prompt=prompt,
+            messages=messages,
             tools=result.get("tools"),
         )
         return await self.review_trace(trace_data)
@@ -242,10 +266,8 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
         if not traces:
             return []
 
-        self._semaphore = asyncio.Semaphore(self.max_workers)
-
         async def _review_with_semaphore(trace: TraceData) -> ReviewResult:
-            async with self._semaphore:
+            async with self.semaphore:
                 return await self.review_trace(trace)
 
         try:
@@ -262,7 +284,7 @@ Be strict in your evaluation. Scores below 0.5 should reflect genuine issues."""
                     ReviewResult(
                         status=ReviewStatus.REJECTED,
                         grade=0.0,
-                        reasoning=f"Task failed: {result}",
+                        reasoning="Task failed",
                         breakdown=GradeBreakdown(),
                     )
                 )
